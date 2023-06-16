@@ -1,8 +1,6 @@
-c sharp  成神
-
 [TOC]
 
-## 基础篇
+## .net6
 
 ### `out`、`ref` 和 `params`参数
 
@@ -763,6 +761,128 @@ using (var sp = services.BuildServiceProvider())
 
 5、.NET注册服务的重载方法很多，看着文档琢磨吧。
 
+### 配置系统
+
+##### 选项方式读取配置
+
+用法:
+
+1. 推荐使用`选项方式`读取，和DI结合更好，且更好利用`reloadonchange`机制。
+2. NuGet安装：Microsoft.Extensions.Options、Microsoft.Extensions.Configuration.Binder，当然也需要Microsoft.Extensions.Configuration、Microsoft.Extensions.Configuration.Json。
+3. 读取配置的时候，DI要声明`IOptions<T>`、`IOptionsMonitor<T>`、`IOptionsSnapshot<T>`等类型。`IOptions<T>`不会读取到新的值；和`IOptionsMonitor` 相比， `IOptionsSnapshot`会在同一个范围内（比如ASP.NET Core一个请求中）保持一致。建议用`IOptionsSnapshot`。
+
+演示：
+
+在读取配置的地方，用`IOptionsSnapshot<T>`注入。不要在构造函数里直接读取`IOptionsSnapshot.Value`，而是到用到的地方再读取，否则就无法更新变化。
+
+`DbSettings`和`SmtpSettings`为两个属性实体类，然后通过构造方法注入`IOptionsSnapshot<DbSettings>`和`IOptionsSnapshot<SmtpSettings>`可以通过`IOptionsSnapshot.Value`属性值获取具体配置的模型对象的值。
+
+```c#
+class Demo
+{
+	private readonly IOptionsSnapshot<DbSettings> optDbSettings;
+	private readonly IOptionsSnapshot<SmtpSettings> optSmtpSettings;
+	public Demo(IOptionsSnapshot<DbSettings> optDbSettings,
+		IOptionsSnapshot<SmtpSettings> optSmtpSettings)
+	{
+		this.optDbSettings = optDbSettings;
+		this.optSmtpSettings = optSmtpSettings;
+	}
+	public void Test()
+	{
+		var db = optDbSettings.Value;
+		Console.WriteLine($"数据库：{db.DbType},{db.ConnectionString}");
+		var smtp = optSmtpSettings.Value;
+		Console.WriteLine($"Smtp：{smtp.Server},{smtp.UserName},{smtp.Password}");
+	}
+}
+```
+
+如下配置
+
+用到的Nuget包`Microsoft.Extensions.Configuration`和`Microsoft.Extensions.DependencyInjection`他们功能分别是读取json配置文件和依赖注入
+
+```c#
+ConfigurationBuilder configBuilder = new ConfigurationBuilder();
+//reloadOnChange参数设置为true，作用是启用"修改后重新加载配置"
+configBuilder.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+IConfigurationRoot config = configBuilder.Build();
+ServiceCollection services = new ServiceCollection();
+//通过Addoptions方法注册与选项相关的服务
+services.AddOptions()
+    //把"DB"节点的内容绑定到DbSetting类型的模型对象上
+	.Configure<DbSettings>(e=>config.GetSection("DB").Bind(e))
+	.Configure<SmtpSettings>(e => config.GetSection("Smtp").Bind(e));
+//把Demo注册为瞬态服务
+services.AddTransient<Demo>();
+using (var sp = services.BuildServiceProvider())
+{
+	while (true)
+	{
+        // IOptionsSnapshot会在新的范围中加载新的配置，在每次循环中都创建一个范围。
+		using (var scope = sp.CreateScope())
+		{
+			var spScope = scope.ServiceProvider;
+			var demo = spScope.GetRequiredService<Demo>();
+			demo.Test();
+		}
+		Console.WriteLine("可以改配置啦");
+		Console.ReadKey();
+	}
+}
+```
+
+##### 从命令行读取配置
+
+从命令行读取需要安装NuGet包`Microsoft.Extensions.Configuration.CommandLine`，命令行入口代码中的参数是args参数传递的，将命令行参数的值交给`AddCommandLine`方法进行解析。
+
+```C#
+ConfigurationBuilder configBuilder = new ConfigurationBuilder();
+configBuilder.AddCommandLine(args);
+IConfigurationRoot config = configBuilder.Build();
+//读取命令行参数server的值
+string server = config["server"];
+Console.WriteLine($"server:{server}");
+```
+
+##### 从环境变量中读取
+
+1. NuGet安装：Microsoft.Extensions.Configuration.EnvironmentVariables。
+2. 然后configurationBuilder. AddEnvironmentVariables()
+   AddEnvironmentVariables() 有无参数和有prefix参数的两个重载版本。无参数版本会把程序相关的所有环境变量都加载进来，由于有可能和系统中已有的环境变量冲突，因此建议用有prefix参数的AddEnvironmentVariables()。读取配置的时候，prefix参数会被忽略。
+3. VS中调试时，避免修改系统环境变量，直接在VS中设置环境变量的方法。
+
+```c#
+/*
+我们将环境变量的前缀设置为了"TEST_" 名字设置为了 "Name"所以我们要在环境变量中设置"TEST_Name"这个配置选项
+*/
+ConfigurationBuilder configBuilder = new ConfigurationBuilder();
+configBuilder.AddEnvironmentVariables("TEST_");
+IConfigurationRoot configRoot = configBuilder.Build();
+string name = configRoot["Name"];
+Console.WriteLine(name);
+```
+
+##### 多配置源问题
+
+.NET Core的配置系统中允许添加多个配置源,这在复杂的系统中是很常见的。.NET Core中的配置系统支持"可覆盖的配置"，也就是我们可以向`ConfigurationBuilder`中注册多个配置提供程序，后添加的配置提供程序可以覆盖先添加的配置提供程序。
+
+1. 按照注册到ConfigurationBuilder的顺序，“后来者居上”，后注册的优先级高，如果配置名字重复，用后注册的值。
+2. 实验：控制台的覆盖环境变量的，自定义Provider的覆盖控制台的。
+
+```c#
+ConfigurationBuilder configBuilder = new ConfigurationBuilder();
+configBuilder.AddJsonFile("appsettings.json")
+    .AddEnvironmentVariables("Test1_").AddCommandLine(args);
+IConfigurationRoot config = configBuilder.Build();
+string server = config["Server"];
+string userName = config["UserName"];
+string password = config["Password"];
+string port = config["Port"];
+```
+
+
+
 ### Configure函数和中间件注册
 
 ##### Configure函数
@@ -789,9 +909,27 @@ Configure函数是ASP.NET Core应用程序中的一个重要方法，用于配�
 6. 请求管道记录中间件（UseRequestResponseLogging）：用于记录请求和响应的详细信息，便于出现问题时进行追踪和排查。
 7. HTTPS重定向中间件（UseHttpsRedirection）：用于将HTTP请求重定向到HTTPS请求，以增加安全性。
 
-### **Entity Framework概念**
+### Entity Framework概念
 
-​		Entity Framework是Microsoft提供的一种ORM（Object-Relational Mapping，对象关系映射）工具，它可以将关系型数据库中的数据映射到.NET代码中的数据实体上。它可以让开发者将精力更多地放在业务逻辑上，而不是关注底层数据访问的细节。Entity Framework支持多种数据库，包括SQL Server、MySQL、Oracle等，并且可以使用LINQ语言进行查询和操作数据库。
+​		Entity Framework是Microsoft提供的一种ORM（Object-Relational Mapping，对象关系映射）工具，它可以将关系型数据库中的数据映射到.NET代码中的数据实体上。让开发者用对象操作的形式操作关系数据库。它可以让开发者将精力更多地放在业务逻辑上，而不是关注底层数据访问的细节。Entity Framework支持多种数据库，包括SQL Server、MySQL、Oracle等，并且可以使用LINQ语言进行查询和操作数据库。
+比如插入：
+
+```c#
+User user = new User(){Name="admin",Password="123"};
+orm.Save(user);
+```
+
+比如查询：
+
+```c#
+Book b = orm.Books.Single(b=>b.Id==3
+ 		||b.Name.Contains(".NET"));
+string bookName = b.Name;
+string aName = a.Author.Name;
+```
+
+
+有哪些ORM：EF core、Dapper、SqlSugar、FreeSql等。
 
 ##### ORM
 
@@ -814,11 +952,392 @@ Entity Framework 和 Hibernate 都是 ORM 框架，它们的相似之处包括�
 3. 映射方式不同：Entity Framework 支持多种映射方式，包括 Code First、Database First 和 Model First 等，而 Hibernate 更加注重 XML 映射文件和注解方式。
 4. 性能不同：Entity Framework 从 6.0 版本开始引入了一些性能优化，但是在某些情况下，Hibernate 的性能可能更好。
 
-### **LINQ查询**
+##### EF core开发搭建
+
+1. 经典步骤：建实体类；建DbContext；生成数据库；编写调用EF Core的业务代码。
+2. 创建实体类
+
+```c#
+public class Book
+{
+    public long Id { get; set; }//主键
+    public string Title { get; set; }//标题
+    public DateTime PubTime { get; set; }//发布日期
+    public double Price { get; set; }//单价
+    public string AuthorName { get; set; }//作者名字
+}
+```
+
+3. 安装数据库驱动包 `Microsoft.EntityFrameworkCore.SqlServer`
+4. 创建实现了IEntityTypeConfiguration接口的实体配置类，配置实体类和数据库表的对应关系
+
+```c#
+class BookEntityConfig : IEntityTypeConfiguration<Book>
+{
+    public void Configure(EntityTypeBuilder<Book> builder)
+    {
+    // 和Book实体对应T_Books表
+        builder.ToTable("T_Books");
+        builder.Property(e => e.Title).HasMaxLength(50).IsRequired();
+        builder.Property(e => e.AuthorName).HasMaxLength(20).IsRequired();
+    }
+}
+```
+
+约定大于配置
+
+5. 创建继承自DbContext的类
+
+```c#
+    class TestDbContext : DbContext
+    {
+        public DbSet<Book> Books { get; set; }
+        //配置连接哪一个数据库
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+        {
+            string connStr = "Server=.;Database=demol;Trusted_Connection=True";
+            optionsBuilder.UseSqlServer(connStr);
+        }
+        
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            base.OnModelCreating(modelBuilder);
+            // 指定从当前程序集寻找 实现了IEntityTypeConfiguration接口的类来创建映射的数据库
+            modelBuilder.ApplyConfigurationsFromAssembly(this.GetType().Assembly);
+        }
+    }
+```
+
+6. Migration数据库迁移 安装`Microsoft.EntityFrameworkCore.Tools`然后执行`Add-Migration InitialCreate`命令创建数据库操作的代码。还需要“程序包管理器控制台”中执行`Update-database`，这个命令会执行最近一次的Migration，执行后才会应用对数据库的操作。 (注意上述命令执行的时候会编译项目，所以要确保项目可以编译通过)
+
+​		面向对象的ORM开发中，数据库不是程序员手动创建的，而是由Migration工具生成的。关系数据库只是盛放模型数据的一个媒介而已，理想状态下，程序员不用关心数据库的操作。
+
+​		根据对象的定义变化，自动更新数据库中的表以及表结构的操作，叫做Migration（迁移）。
+迁移可以分为多步（项目进化），也可以回滚。
+
+#### 使用EF core进行CRUD增删改查
+
+上述步骤中我们已经完成了数据库以及表的创建
+
+##### 插入操作
+
+1. 只要操作Books属性，就可以向数据库中增加数据，但是通过C#代码修改Books中的数据只是修改了内存中的数据。对Books做修改后，需要调用DbContext的异步方法SaveChangesAsync()把修改保存到数据库。也有同步的保存方法SaveChanges()，但是用EF Core都推荐用异步方法。
+2. EF Core默认会跟踪(Track)实体类对象以及DbSet的改变。
+3. 演示数据插入。
+
+```c#
+using (var td = new TestDbContext())
+{
+    Book b1 = new()
+    {
+        AuthorName = "杨中科1",
+        Title = "零基础趣学C语言",
+        Price = 59.8,
+        PubTime = new DateTime(2019, 3, 1),
+        Birth = "2023"
+    };
+td.Books.Add(b1);
+await td.SaveChangesAsync();
+}
+```
+
+由于TestDbContext的父类DbContext实现了IDisposable接口，IDisposable定义了Dispose垃圾回收方法。因此TestDbContext对象需要使用using代码块进行资源释放。
+
+##### 查询数据
+
+Books属性和数据库中的T_Books表对应，Books属性是`DbSet<Book>`类型的，而DbSet实现了`IEnumerable<T>`接口，因此我们可以使用LINQ操作对DbSet进行数据查询。 LINQ 扩展方法都是作为 IEnumerable 接口的静态扩展方法实现的。
+
+```C#
+ //条件查询
+IEnumerable<Book> books = td.Books.Where(b => b.Price > 50);
+    foreach (var b in books)
+    {
+        Console.WriteLine($"Id={b.Id},Title={b.Title},Price={b.Price}");
+    }
+
+//按照指定字段排序
+    IEnumerable<Book> books = td.Books.OrderByDescending(b => b.Price);
+    foreach (var b in books)
+    {
+        Console.WriteLine($"Id={b.Id},Title={b.Title},Price={b.Price}");
+    }
+
+//使用GroupBy分组
+    var books = td.Books.GroupBy(b => b.AuthorName).Select(g => new { AuthorName = g.Key, BooksCount = g.Count(), MaxPrice = g.Max(b => b.Price) });
+
+    foreach (var g in books)
+    {
+        Console.WriteLine($"作者:{g.AuthorName},图书数量:{g.BooksCount},最高价格:{g.MaxPrice}");
+    }
+```
+
+##### 修改数据
+
+要对数据进行修改，首先需要把要修改的数据查询出来，然后再对查询出来的对象进行修改，然后再执行SaveChangesAsync()保存修改
+
+```c#
+    var b = td.Books.FirstOrDefault(b => b.Title == "零基础趣学C语言");
+    b.AuthorName = "Jun Wu";
+    await td.SaveChangesAsync();
+```
+
+
+
+##### 删除数据
+
+删除也是先把要修改的数据查询出来，然后再调用DbSet或者DbContext的Remove方法把对象删除，然后再执行SaveChangesAsync()保存修改。
+
+```c#
+    var b = td.Books.FirstOrDefault(b => b.Title == "零基础趣学C语言");
+    td.Books.Remove(b);
+    await td.SaveChangesAsync();
+```
+
+无论上面的修改数据的代码还是删除数据的代码，都要先执行数据的查询操作。这样在EF Core的底层其实发生了先执行Select的SQL语句，然后执行Update或者Delete的SQL语句。
+
+#### 约定配置
+
+##### 约定的主要规则：
+
+1. 表名采用DbContext中的对应的DbSet的属性名。
+2. 数据表列的名字采用实体类属性的名字，列的数据类型采用和实体类属性类型最兼容的类型。
+3. 数据表列的可空性取决于对应实体类属性的可空性。
+4. 名字为Id的属性为主键，如果主键为short, int 或者 long类型，则默认采用自增字段，如果主键为Guid类型，则默认采用默认的Guid生成机制生成主键值。
+
+##### 两种配置方式
+
+1. Data Annotation
+   把配置以特性（Annotation）的形式标注在实体类中。
+
+   ```c#
+   [Table("T_Books")]
+   public class Book
+   {
+   }
+   ```
+
+   优点：简单；缺点：耦合。
+
+   优点：简单；缺点：耦合。
+
+2. Fluent API
+
+   ```c#
+   builder.ToTable("T_Books");
+   ```
+
+   把配置写到单独的配置类中。
+   缺点：复杂；优点：解耦
+
+   把配置写到单独的配置类中。
+   缺点：复杂；优点：解耦
+
+3. 大部分功能重叠。可以混用，但是不建议混用。
+
+##### Fluent API 
+
+1. 视图与实体类映射：
+
+   ```c#
+   modelBuilder.Entity<Blog>().ToView("blogsView");
+   ```
+
+2. 排除属性映射：不做属性和数据库字段的映射，无视这个属性
+
+   ```c#
+   modelBuilder.Entity<Blog>().Ignore(b => b. Name2);
+   ```
+
+3. 配置列名：不用默认的列名
+
+   ```c#
+   modelBuilder.Entity<Blog>().Property(b =>b.BlogId).HasColumnName("blog_id");
+   ```
+
+4. 配置列数据类型：
+
+   ```c#
+   builder.Property(e => e.Title) .HasColumnType("varchar(200)")
+   ```
+
+5. 配置主键
+   默认把名字为Id或者“实体类型+Id“的属性作为主键，可以用HasKey()来配置其他属性作为主键。
+
+   ```c#
+   modelBuilder.Entity<Student>().HasKey(c => c.Number);
+   ```
+
+   支持复合主键，但是不建议使用。最好别用复合主键淘汰多年的技术了。
+
+6. 生成列的值
+
+   ```c#
+   modelBuilder.Entity<Student>().Property(b => b.Number).ValueGeneratedOnAdd();
+   ```
+
+7. 可以用HasDefaultValue()为属性设定默认值
+
+   ```c#
+   modelBuilder.Entity<Student>().Property(b => b.Age).HasDefaultValue(6);
+   ```
+
+8. 索引
+
+   ```c#
+   modelBuilder.Entity<Blog>().HasIndex(b => b.Url);
+   ```
+
+   复合索引
+
+   唯一索引：IsUnique()；聚集索引：IsClustered()
+
+9. 用EF Core太多高级特性的时候谨慎，尽量不要和业务逻辑混合在一起，以免“不能自拔”。比如Ignore、Shadow、Table Splitting等……
+
+总结：
+
+Fluent API中很多方法都有多个重载方法。比如HasIndex、Property()。
+把Number属性定义为索引，下面两种方法都可以：
+
+```c#
+builder.HasIndex("Number");
+builder.HasIndex(b=>b.Number);
+```
+
+推荐使用HasIndex(b=>b.Number)、Property(b => b.Number)这样的写法，因为这样利用的是C#的强类型检查机制
+
+1.  Data Annotation 、Fluent API大部分功能重叠。可以混用，但是不建议混用。
+2. 有人建议混用，即用了Data Annotation 的简单，又用到Fluent API的强大，而且实体类上标注的[MaxLength(50)]、[Required]等标注可以被ASP.NET Core中的验证框架等复用。我为什么不建议混用。
+3. 我和业界很多人都倾向只使用Fluent API。本课以讲解Fluent API为主(尽量用约定)，如果项目强制用Data Annotation 请翻文档，知识都是通用的。
+
+#### EF Core主键策略
+
+##### 自增主键
+
+1. EF Core支持多种主键生成策略：自动增长；Guid；Hi/Lo算法等。
+2. long、int等类型主键，默认是自增。因为是数据库生成的值，所以SaveChanges后会自动把主键的值更新到Id属性。试验一下。场景：插入帖子后，自动重定向帖子地址。
+3. 自动增长。优点：简单；缺点：数据库迁移的时候可能会有很多个相同数值的主键，给迁移造成阻碍。
+4. 在分布式系统中比较麻烦；并发性能差。在多个主键同时插入式为了保证主键自增的需要用到锁，直接会影响数据插入的速度性能。
+5. 在sqlServer中自增字段的代码中不能为Id赋值，必须保持默认值0，否则运行的时候就会报错。
+
+##### Guid主键(UUID)
+
+1.  Guid算法（或UUID算法）生成一个全局唯一的Id。适合于分布式系统，在进行多数据库数据合并的时候很简单。优点：简单，高并发，全局唯一；缺点：磁盘空间占用大。
+2. Guid值不连续。使用Guid类型做主键的时候，不能把主键设置为聚集索引。因为聚集索引是按照顺序保存主键的，因此用Guid做主键性能差。比如MySQL的InnoDB引擎中主键是强制使用聚集索引的，因为聚集索引主键是有序的所以每次插入Guid的主键会导致数据库的重新排序，造成严重的性能浪费。有的数据库支持部分的连续Guid，比如SQLServer中的NewSequentialId()，但也不能解决问题。在SQLServer等中，不要把Guid主键设置为聚集索引；在MySQL中，插入频繁的表不要用Guid做主键。
+
+3. 演示Guid用法：既可以让EF Core给赋值，也可以手动赋值（推荐）。
+
+##### Hi/Lo算法
+
+1. Hi/Lo算法：EF Core支持Hi/Lo算法来优化自增列。主键值由两部分组成：高位（Hi）和低位（Lo），高位由数据库生成，两个高位之间间隔若干个值，由程序在本地生成低位，低位的值在本地自增生成。
+2. 不同进程或者集群中不同服务器获取的Hi值不会重复，而本地进程计算的Lo则可以保证可以在本地高效率的生成主键值。但是HiLo算法不是EF Core的标准。
+
+#### Migration迁移理解
+
+1. 使用迁移脚本，可以对当前连接的数据库执行编号更高的迁移，这个操作叫做“向上迁移”（Up），也可以执行把数据库回退到旧的迁移，这个操作叫“向下迁移”（Down）。
+
+```c#
+           //Up向上迁移  
+		protected override void Up(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.CreateTable(
+                name: "Rabbits", 
+                ////
+   				);
+        }
+       // 回滚 向下迁移
+       protected override void Down(MigrationBuilder migrationBuilder)
+        {
+            migrationBuilder.DropTable(
+                name: "Rabbits");
+        }
+```
+
+2. 除非有特殊需要，否则不要删除Migrations文件夹下的代码。
+
+3. 进一步分析Migrations下的代码。分析Up、Down等方法。查看Migration编号。
+
+4. 查看数据库的`__EFMigrationsHistory`表：迁移记录由EF Core维护,记录当前数据库曾经应用过的迁移脚本，按顺序排列。
+
+##### Migration其他的命令
+
+1. Update-Database XXX 
+   把数据库回滚到XXX的状态，迁移脚本不动。
+
+2. Remove-migration
+   删除最后一次的迁移脚本
+
+3. Script-Migration
+   生成迁移SQL代码。有了Update-Database 为什么还要生成SQL脚本。
+   可以生成版本D到版本F的SQL脚本：
+   Script-Migration D F
+   生成版本D到最新版本的SQL脚本：Script-Migration D
+4. Get-Migrations：显示可用的迁移。
+
+##### 反向工程
+
+根据数据库表来反向生成实体类
+
+```shell
+Scaffold-DbContext 'Server=.;Database=demo1;Trusted_Connection=True;MultipleActiveResultSets=true' Microsoft.EntityFrameworkCore.SqlServer
+```
+
+1. 生成的实体类可能不能满足项目的要求，可能需要手工修改或者增加配置。
+2. 再次运行反向工程工具，对文件所做的任何更改都将丢失。
+3. 不建议把反向工具当成了日常开发工具使用，不建议DBFirst。
+
+#### EF Core底层原理
+
+EF Core 使用 Code First 模式将 C# 实体类映射到数据库中的表。EF Core 底层是建立在 ADO.NET 核心类库之上的，而它的数据访问方式是通过 ADO.NET 的 API 实现的。
+
+![1686819432375](E:\typora\homework\noteCsharp\img\1686819432375.png)
+
+##### EF Core有哪些做不到的事
+
+C#千变万化；SQL功能简单。存在合法的C#语句无法被翻译为SQL语句的情况
+
+例如使用PadLeft方法无法被翻译:
+
+```c#
+ IEnumerable<Rabbit> name = td.Rabbits.Where(p => p.Name.PadLeft(5) == "帅哥");
+
+/*
+   The LINQ expression 'DbSet<Rabbit>()
+    .Where(r => r.Name.PadLeft(5) == "帅哥")' could not be translated
+  */出现表达式xxxx无法被翻译的错误
+```
+
+##### EF Core编译原理
+
+1. `EF Core`将C# 代码翻译成`AST`抽象语法树(代表了程序代码的解析树，其中每个节点都表示代码中的一个语法结构，比如where方法groupBy方法都会被翻译成一个节点。)
+2. `SqlServer EF Core Provider`将抽象语法树的各个节点翻译成SQL语句，然后把这些SQL语句再交给`SqlServer ADO.NET Provider`(因为不同的数据库语法可能不一样所以需要对应的`SqlServer EF Core Provider`来翻译)。
+3. `SqlServer ADO.NET Provider`负责连接数据库执行这些sql语句。
+
+![1686820606369](E:\typora\homework\noteCsharp\img\1686820606369.png)
+
+##### 通过代码查看EF Core的SQL语句
+
+这是我们使用简单日志记录SQL语句，在上下文类中，重写`OnConfiguring`方法中配置如下
+
+```c#
+  optionsBuilder.LogTo(Console.WriteLine);
+
+
+//启动项目看到插入输出的SQL语句
+      INSERT INTO [T_Rabbit] ([id], [Name])
+      VALUES (@p0, @p1);
+```
+
+相同的linQ语句会在连接不同类型的数据库时被翻译成不同的SQL语句，类如SQL server中取前几条是top，mySQl中是limit。
+
+
+
+
+
+### LINQ查询
 
 LINQ是一种语言集成查询（Language Integrated Query）技术，可以在C#，.NET语言中使用。它提供了一种简单、统一的方式来查询各种数据源，包括集合、数据库和XML文档等。
 
-​	LINQ查询可以使用查询表达式或方法语法来编写。查询表达式使用类似SQL的语法来描述查询，而方法语法使用一系列扩展方法来实现查询。**
+​	LINQ查询可以使用查询表达式或方法语法来编写。查询表达式使用类似SQL的语法来描述查询，而方法语法使用一系列扩展方法来实现查询。
 
 下面是一个使用LINQ查询集合的示例：
 
