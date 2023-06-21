@@ -52,7 +52,7 @@ Socket 协议的数据传输采用数据包的形式进行。数据包由头部�
 Socket 协议的头部格式如下:
 
 ```html
-Copy code<头部长度>          =<头部长度字节数>  
+<头部长度>          =<头部长度字节数>  
 <头部标识>         =<头部标识符>  
 <头部类型>         =<头部类型码>  
 <数据长度>        =<数据长度字节数>  
@@ -1329,9 +1329,330 @@ C#千变万化；SQL功能简单。存在合法的C#语句无法被翻译为SQL�
 
 相同的linQ语句会在连接不同类型的数据库时被翻译成不同的SQL语句，类如SQL server中取前几条是top，mySQl中是limit。
 
+#### 关系配置
 
+##### 一对多配置
 
+一对多是常见的实体类关系。下面两个类即为一对多的关系。
 
+```c#
+//Article.cs
+public class Article
+{
+	public long Id { get; set; }//主键
+	public string Title { get; set; }//标题
+	public string Content { get; set; }//内容
+	public List<Comment> Comments { get; set; } = new List<Comment>(); //此文章的若干条评论
+}
+//Comment.cs
+public class Comment
+{
+	public long Id { get; set; }
+	public Article Article { get; set; }
+	public long ArticleId { get; set; }
+	public string Message { get; set; }
+}
+
+```
+
+对实体类使用Fluent API进行关系配置。下面是在commentConfig.cs 中配置一对多，反之在AticleConfig.cs也能配置。
+
+```c#
+    class CommentConfig : IEntityTypeConfiguration<Comment>
+    {
+        public void Configure(EntityTypeBuilder<Comment> builder)
+        {
+            builder.ToTable("T_Comments");
+            builder.Property(a => a.Message).IsUnicode().IsRequired();
+            //表示一个comment对应一个Article ，一个Article对应多个Comment
+            builder.HasOne<Article>(c => c.Article).WithMany(a => a.Comments).IsRequired();
+        }
+    }
+```
+
+HasOne方法有多个重载，调用别调用错。
+
+一对多：HasOne(…).WithMany(…);
+一对一：HasOne(…).WithOne (…);
+多对多：HasMany (…).WithMany(…);
+
+**数据获取**
+
+连表查询
+
+```c#
+using TestDbContext ctx = new TestDbContext();
+Article a = ctx.Articles.Include(a => a.Comments).Single(a => a.Id == 1);
+Console.WriteLine(a.Title);
+// 如果这里不使用include就不会使用join连表，comments就为空
+foreach (Comment c in a.Comments)
+{
+	Console.WriteLine(c.Id + ":" + c.Message);
+}
+```
+
+其中起到关联作用的就是include，它用来生成对其他关联实体类的查询操作。
+
+```sql
+ SELECT [t0].[Id], [t0].[Content], [t0].[Title], [t1].[Id], [t1].[ArticleId], [t1].[Message]
+      FROM (
+          SELECT TOP(2) [t].[Id], [t].[Content], [t].[Title]
+          FROM [T_Article] AS [t]
+          WHERE [t].[Id] = CAST(1 AS bigint)
+      ) AS [t0]
+      LEFT JOIN [T_Comments] AS [t1] ON [t0].[Id] = [t1].[ArticleId]
+      ORDER BY [t0].[Id]
+```
+
+从日志中可以看到执行的查询的SQL语句使用了左连接，也就是我们的include方法被转换成了左连接。
+
+##### 创建实体外键
+
+1. EF Core根据命名规则在数据表中建外键列。在`一对多`的`多`端的实体类创建一个外键列,比如上面的例子中，T_Comments表中就有一个自动创建的列ArticleId，在代码中我们不需要对这个列进行处理。
+
+2. 如果需要获取外键列的值，就需要做关联查询，效率低。
+3. 所以为了不做关联查询又可以获取外键，我们可以在实体类`Comment`中显式声明一个外键属性。比如在`Comment`类中增加一个Article属性，然后在配置中通过`HasForeignKey(c=>Article)`指定这个属性为外键即可
+
+```c#
+		//配置外键
+builder.HasOne<Article>(c => c.Article).WithMany(a => a.Comments)
+			.IsRequired().HasForeignKey(c => c.ArticleId);
+```
+
+##### 单项导航
+
+上面的关系配置的例子中，我们不仅可以通过Article获取Comment，也可以通过Comment获取Article。这样的关系叫做`双向导航`
+
+**配置单项导航**
+
+比如：当系统有很多实体类都有用户类的实体属性时，但是用户实体类不需要为每个实体类都声明一个导航属性。在这种情况下，我们就需要一种只在“多端”声明导航属性，而不需要在“一端”声明导航属的单向导航机制。
+
+有以下实体类：
+
+```c#
+//Leave.cs
+class Leave
+{
+	public long Id { get; set; }
+	public User Requester { get; set; }//申请者
+	public User? Approver { get; set; } //审批者
+	public string Remarks { get; set; } //说明
+	public DateTime From { get; set; } //开始日期
+	public DateTime To { get; set; } //结束日期
+	public int Status { get; set; }//状态
+}
+//User.cs
+class User
+{
+	public long Id { get; set; }
+	public string Name { get; set; }//姓名
+}
+//LeaveConfig.cs
+class LeaveConfig : IEntityTypeConfiguration<Leave>
+{
+	public void Configure(EntityTypeBuilder<Leave> builder)
+	{
+		builder.ToTable("T_Leaves");
+		builder.HasOne<User>(l => l.Requester).WithMany();
+		builder.HasOne<User>(l => l.Approver).WithMany();
+		builder.Property(l => l.Remarks).HasMaxLength(1000).IsUnicode();
+	}
+}
+
+```
+
+1. Leave类中有`Requester` `Approver`有两个User类型属性，它们都是单向导航属性。
+2. 不设置反向的属性，然后配置的时候WithMany()不设置参数即可。因为User类没有任何指向Leave类的属性，所以WithMany()方法不设置参数。
+3. 对于主从结构的“一对多”表关系，我们一般是声明双向导航属性，对于被很多表引用的基础表，一般都声明单向导航。
+
+##### 一对一关系
+
+在两个类中分别声明一个指向对方的属性，就构成了一对一的关系，对于一对一的关系，EF Core不会自动生成一个指向对方的外键。因此我们必须手动显式地在其中一个实体类中声明一个外键属性。
+
+实体类如下所示：
+
+```c#
+// Order.cs
+class Order
+{
+	public long Id { get; set; }
+	public string Name { get; set; }//商品名
+	public string Address { get; set; }//收货地址
+	public Delivery? Delivery { get; set; }//快递信息
+}
+
+// Delivery.cs
+class Delivery
+{
+	public long Id { get; set; }
+	public string CompanyName { get; set; }//快递公司名
+	public String Number { get; set; }//快递单号
+	public Order Order { get; set; }//订单
+	public long OrderId { get; set; }//指向订单的外键
+}
+
+// OrderConfig.cs
+class OrderConfig : IEntityTypeConfiguration<Order>
+{
+	public void Configure(EntityTypeBuilder<Order> builder)
+	{
+		builder.ToTable("T_Orders");
+		builder.Property(o => o.Address).IsUnicode();
+		builder.Property(o => o.Name).IsUnicode();
+		builder.HasOne<Delivery>(o => o.Delivery).WithOne(d => d.Order)
+			.HasForeignKey<Delivery>(d => d.OrderId);
+	}
+}
+```
+
+和一对多关系类似，在一对一关系中，把关系放到那一方的实体类的配置中都可以。这里把关系的配置放到Order类的配置中。由于在一对一关系中，必须显式指定外键，因此我们通过HasForeignKey()方法声明外键对应的属性。
+
+##### 多对多配置
+
+多对多是比较复杂的一种实体类的关系，在EF Core的旧版本中我们只能通过两个一对多关系模拟实现多对多。从EF Core5.0，EF Core提供了对多对多关系的支持。
+
+多对多实体类如下所示：
+
+学生类Student中有一个List类型的Teachers代表这个学生的所有老师，同样Teacher类也有一个List类型的Student代表这个老师的所有学生。
+
+```c#
+// Student.cs
+class Student
+{
+	public long Id { get; set; }
+	public string Name { get; set; }
+	public List<Teacher> Teachers { get; set; } = new List<Teacher>();
+}
+// Teacher.cs
+class Teacher
+{
+	public long Id { get; set; }
+	public string Name { get; set; }
+	public List<Student> Students { get; set; } = new List<Student>();
+}
+//StudentConfig.cs
+class StudentConfig : IEntityTypeConfiguration<Student>
+{
+	public void Configure(EntityTypeBuilder<Student> builder)
+	{
+		builder.ToTable("T_Students");
+		builder.Property(s => s.Name).IsUnicode().HasMaxLength(20);
+		builder.HasMany<Teacher>(s => s.Teachers).WithMany(t => t.Students)
+			.UsingEntity(j => j.ToTable("T_Students_Teachers"));
+	}
+}
+```
+
+同样多对多的关系配置可以放在任何一方的配置中，这里放在`StudentConfig.cs`中。这里的关系两端都是多，因此关系配置使用`HasMany(xx).HasMany(xx)`。
+
+`一对多`和`一对一`都只需要在表中增加外键即可，但在多对多的关系中，我们必须引入一张额外的表来保存两张表之间的对应关系。使用Fluent API中`.UsingEntity(j => j.ToTable("T_Students_Teachers")`来配置中间表。
+
+**插入数据**
+
+其中AddRange方法只是循环调用Add方法把多个实体类加入上下文。
+
+```c#
+Student s1 = new Student { Name = "tom" };
+Student s2 = new Student { Name = "lily" };
+Student s3 = new Student { Name = "lucy" };
+Student s4 = new Student { Name = "tim" };
+Student s5 = new Student { Name = "lina" };
+Teacher t1 = new Teacher { Name = "杨中科" };
+Teacher t2 = new Teacher { Name = "罗翔" };
+Teacher t3 = new Teacher { Name = "刘晓艳" };
+t1.Students.Add(s1);
+t1.Students.Add(s2);
+t1.Students.Add(s3);
+t2.Students.Add(s1);
+t2.Students.Add(s3);
+t2.Students.Add(s5);
+t3.Students.Add(s2);
+t3.Students.Add(s4);
+using TestDbContext ctx = new TestDbContext();
+
+ctx.Teachers.AddRange(t1,t2, t3);
+await ctx.SaveChangesAsync();
+```
+
+#### EF core原理
+
+##### IEnumerable和IQueryable区别
+
+1. IQuerable其实就是一个继承自IEnumerable接口的接口，Queryable类中的Where方法除了参数和类型返回值的类型是IQueryable，其他用法和IEnumerable类中的Where方法没有什么不同。
+2. 普通集合的版本(IEnumerable)是在内存中对每条数据过滤（客户端评估），而IQueryable版本则是把查询操作翻译成SQL语句（服务器端评估）。
+
+例如以下查询:
+
+```c#
+using TestDbContext ctx = new TestDbContext();
+//使用IQueryable版本的Where方法
+IQueryable<Comment> cs =  ctx.Comments.Where(c => c.Id > 1);
+
+/*
+IQueryable版本生成的SQL语句
+ SELECT t.Id, t.ArticleId, t.Message
+              FROM T_Comments AS t
+              WHERE t.Id > CAST(1 AS bigint)*/
+
+//使用IEnumerable版本的Where方法
+IEnumerable<Comment> cs_ie = ctx.Comments;
+foreach (Comment c in cs_ie.Where(c => c.Id > 1))
+{
+	Console.WriteLine(c.Id + ":" + c.Message);
+}
+/*
+ SELECT t.Id, t.ArticleId, t.Message
+              FROM T_Comments AS t
+*/
+```
+
+**延迟执行**
+
+IQueryable方法不仅可以带来“服务端评估的功能”，还提供了延迟执行的能力。
+
+```c#
+IQueryable<Comment> cs_ie = ctx.Comments.Where(c => c.Id > 1);
+Console.WriteLine(cs_ie);
+//以上查询的SQL并没有立即执行
+```
+
+**那么IQueryable什么时候才会执行查询呢？**
+
+对于IQueryable接口，调用“非立即执行”方法的时候不会执行查询，而调用“立即执行”方法的时候则会立即执行查询。除了遍历IQueryable操作之外，还有`ToArray` `Tolist` `Min` `Max` `Count`等立即执行方法。判断一个方法是不是非立即执行方法，一个方法的返回值为IQueryable类型，这个方法一般就是非立即执行方法。
+
+**EF Core为什么要实现延迟执行的机制呢？**
+
+因为我们可以先使用IQueryable拼接出复杂的条件，再去执行查询。
+
+拼接复杂SQL
+
+```c#
+void QueryBooks(string searchWords, bool searchAll, bool orderByPrice, double upperPrice)
+{
+	using TestDbContext ctx = new TestDbContext();
+	IQueryable<Book> books = ctx.Books.Where(b => b.Price <= upperPrice);
+	if (searchAll)//匹配书名或、作者名
+	{
+		books = books.Where(b => b.Title.Contains(searchWords) || b.AuthorName.Contains(searchWords));
+	}
+	else//只匹配书名
+	{
+		books = books.Where(b => b.Title.Contains(searchWords));
+	}
+	if (orderByPrice)//按照价格排序
+	{
+		books = books.OrderBy(b => b.Price);
+	}
+	foreach (Book b in books)
+	{
+		Console.WriteLine($"{b.Id},{b.Title},{b.Price},{b.AuthorName}");
+	}
+}
+```
+
+使用以上方法传递的参数不同，我们拼接完成IQueryable不同，因此最后执行查询的时候生成的SQL语句也不同。
+
+##### 分页查询和IQueryable的复用
 
 ### LINQ查询
 
