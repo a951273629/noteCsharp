@@ -1654,6 +1654,243 @@ void QueryBooks(string searchWords, bool searchAll, bool orderByPrice, double up
 
 ##### 分页查询和IQueryable的复用
 
+1. IQueryable是一个待查询的逻辑，因此它是可以被重复使用的。
+
+```c#
+IQueryable<Book> books = ctx.Books.Where(b => b.Price <= 8);
+Console.WriteLine(books.Count());
+Console.WriteLine(books.Max(b=>b.Price));
+foreach (Book b in books.Where(b => b.PubTime.Year > 2000))
+{
+	Console.WriteLine(b.Title);
+}
+```
+
+上述代码中由于Count,Max和foreach都是立即执行操作，因此对IQueryable的这3个操作都各自执行了相应的查询逻辑。IQueryable让我们可以复用之前生成的查询逻辑
+
+2. 使用LINQ的Skip()和Take()方法可以实现分页查询
+
+在LINQ语法中可以使用Skip（n）方法可以跳过指定条数的数据，使用Take(n)方法取最多n条数据，**这两个方法配合可以实现分页**。比如Skip(3).Take(8)，就是从第3条数据开始取最多8条数据。在EF Core中也支持这两个方法。
+
+使用分页查询要注意尽量显示的指定一个排序规则，因为如果不指定排序规则。那么数据库的查询计划对于数据的排序可能是不确定的。
+
+以下分页代码也用到了IQueryable复用的特性
+
+```c#
+//pageIndex当前第几页
+//pageSize 一页有几条数据
+void OutputPage(int pageIndex, int pageSize)
+{
+	using TestDbContext ctx = new TestDbContext();
+	IQueryable<Book> books = ctx.Books.Where(b => !b.Title.Contains("张三"));
+	long count = books.LongCount();//总条数
+    //Ceiling函数时向上取整
+	long pageCount = (long)Math.Ceiling(count * 1.0 / pageSize);//页数
+	Console.WriteLine("页数：" + pageCount);
+    //跳过页数*一页数据的数量 取pageSize条数据 
+	var pagedBooks = books.Skip((pageIndex - 1) * pageSize).Take(pageSize);
+	foreach (var b in pagedBooks)
+	{
+		Console.WriteLine(b.Id + "," + b.Title);
+	}
+}
+```
+
+上述代码中使用查询得到books类，然后使用LongCount方法得到总条数，使用count/pageSize得到总页数，但是考虑到最后一页不满，因此我们用Ceiling方法获得整数类型的总页数。
+
+##### IQueryable的底层运行
+
+我们知道，ADO.NET中有DataReader和DateTable两种读取数据库查询结果的方式。如果查询结果有很多条数据,DataTable会把所有数据一次性从数据库服务器加载到客户端内存中，而DataReader则会分批从数据库服务器读取数据。
+
+1. DataReader的优点是客户端内存占用小，缺点是如果遍历读取数据并行处理的过程缓慢的话，会导致程序占用数据库连接的时间较长，从而降低数据库服务器的并发能力。
+2. DataTable的优点是数据被快速的加载到内存中，因此不会较长时间的占用数据库连接，缺点就是数据量大的话，客户端的内存占用会比较大。
+
+IQueryable遍历读取数据的时候，用的是类似DataReader的方式。在执行遍历的过程中假如我们关闭了SQL Server的服务器程序就会出错，因为IQueryable内部的遍历就是在调用DataReader进行数据的读取。
+
+​	如果需要一次性把所有的数据读取到内存中，可以使用IQueryable的终结方法ToArray，ToArraryAsync，ToList，ToListAsync等。
+
+```c#
+using var ctx = new TestDbContext();
+// 一次性加载1万条数据到内存中
+List<Book> books = await ctx.Books.Take(10000).ToListAsync();
+foreach (var item in books)
+{
+    Console.WriteLine(item);
+}
+```
+
+##### 多个IQueryable的遍历嵌套
+
+在遍历一个IQueryable的时候，我们可能需要同时遍历另外一个IQueryable，IQueryable底层使用DataReader从数据库服务器读取查询结果，而很多数据不支持多个DataReader同时执行。
+
+错误的数据库遍历
+
+```c#
+var books = ctx.Books.Where(b => b.Id>2);
+foreach (var b in books)
+{
+    foreach (var a in ctx.Authors)
+    {
+        Console.WriteLine(a);
+    }
+}
+//异常
+//System.InvalidOperationException:“There is already an open DataReader associated with this Connection which must be closed first
+```
+
+虽然可以在连接字符串中通过设置MultipleActiveResultSets=true 开启"允许多个DataReader执行"，但是只有SQL Server支持MultipleActiveResultSets选项。
+
+因此建议采用"一次性加载到内存"以改造其中一个循环的方式解决，比如修改为
+
+```c#
+var books = ctx.Books.Where(b => b.Id>2).ToList();
+```
+
+##### IQueryable的异步方法
+
+异步编程通常可以提升系统的吞吐量，应该优先使用异步方法
+
+IQueryable异步方法有LongCountAsync，MaxAsync，MinAsync等等，IQueryable的异步方法都是立即执行的方法，而GroupBy，Join，Where等非立即执行方法没有对应的异步方法。因为这些方法没有真的执行SQL语句，并不消耗I/O操作，因此不需要定义这些方法的异步版本。
+
+##### 执行原生SQL语句
+
+我们可以通过`dbCtx,Database,ExecuteSqlInterpolated`或者异步的`dbCtx,Database,ExecuteSqlInterpolatedAsync`方法执行原生的SQL语句
+
+执行非查询语句
+
+```c#
+string aName = "二明1";
+double price = 555;
+int rows = await ctx.Database.ExecuteSqlInterpolatedAsync(@$"
+	insert into T_Books (Title,PubTime,Price,AuthorName)
+	select Title, PubTime, Price,{aName} from T_Books where Price>{price}");
+                                                          
+/*
+生成的sql语句
+  insert into T_Books (Title,PubTime,Price,AuthorName)
+        select Title, PubTime, Price,@p0 from T_Books where Price>@p1
+*/
+```
+
+执行sql查询语句
+
+如果我们要执行一个SQL语句是一个查询语句，并且查询的结果会对应一个实体类，就可以调用对应实体类的DbSet的FromSqlInterpolated方法执行一个SQL查询语句，方法的参数是FormattableString类型，因此同样可以使用字符串内插传递参数。
+
+```c#
+int IdNumber = 10086;
+IQueryable<Book> books =  ctx.Books.FromSqlInterpolated($@"select top(100) * from T_Books where [Id]>{IdNumber} order by newid()");
+foreach (var item in books)
+{
+    Console.WriteLine(item);
+}
+```
+
+FromSqlInterpolated使用有以下局限
+
+1. SQL查询必须返回实体类型对应数据表的所有列
+2. 查询结果集中的列明必须与属性映射到的列名匹配
+3. SQL语句只能进行表单查询，不能使用Join语句进行关联查询，但是可以在查询后面使用Include方法进行关联数据的获取。
+
+查询再加工
+
+由于IQueryable这种再加工的能力，我们可以对于原生SQL查询出来的数据再次进行分页，分组，二次过滤等，例如下面的分页操作。
+
+```c#
+books.Skip(5).Take(10);
+```
+
+##### 调用SaveChanges方法如何知道实体类改变了
+
+当我门从上下文中查询出的对象改变并且调用SaveChanges方法，EF Core会检测对象的状态改变，然后把变化的数据保存到数据库中。但是实体类没有实现属性改变的通知机制
+
+EF Core默认采用了"快照更改跟踪"实现实体类改变的检测。快照更改跟踪：首次跟踪一个实体的时候，EF Core 会创建这个实体的快照。执行SaveChanges()等方法时，EF Core将会把存储的快照中的值与实体的当前值进行比较。
+
+1. 已添加(Added)：DbContext正在跟踪此实体，但数据库中尚不存在该实体。
+2. 未改变(Unchanged)：DbContext正在跟踪此实体，该实体存在于数据库中，其属性值和从数据库中读取到的值一致，未发生改变。
+3. 已修改(Modified)：DbContext正在跟踪此实体，并存在于数据库中，并且其部分或全部属性值已修改。
+4. 已删除(Deleted)：DbContext正在跟踪此实体，并存在于数据库中，但在下次调用 SaveChanges 时要从数据库中删除对应数据。
+5. 已分离(Detached)：DbContext未跟踪该实体。
+
+对于不同状态的实体类，执行SvaeChanges的时候，EF Core会执行如下不同的操作
+
+1. 对于“已分离”和“未改变”的实体，SaveChanges()忽略；
+2. “已添加”的实体，SaveChanges() 插入数据库；
+3. “已修改”的实体，SaveChanges() 更新到数据库；
+4. “已删除”的实体，SaveChanges() 从数据库删除；
+
+​		使用DbContext的Entry()方法来获得实体在EF Core中的跟踪信息对象EntityEntry。EntityEntry类的State属性代表实体的状态，通过DebugView.LongView属性可以看到实体的变化信息。如下代码：
+
+```c#
+using TestDbContext ctx = new TestDbContext();
+Book[] books = ctx.Books.Take(3).ToArray();
+Book b1 = books[0];
+Book b2 = books[1];
+Book b3 = books[2];
+Book b4 = new Book { Title = "零基础趣学C语言", AuthorName = "杨中科" };
+Book b5 = new Book { Title = "百年孤独", AuthorName = "马尔克斯" };
+b1.Title = "abc";
+ctx.Remove(b3);
+ctx.Add(b4);
+EntityEntry entry1 = ctx.Entry(b1);
+EntityEntry entry2 = ctx.Entry(b2);
+EntityEntry entry3 = ctx.Entry(b3);
+EntityEntry entry4 = ctx.Entry(b4);
+EntityEntry entry5 = ctx.Entry(b5);
+Console.WriteLine("b1.State:" + entry1.State);
+Console.WriteLine("b1.DebugView:" + entry1.DebugView.LongView);
+Console.WriteLine("b2.State:" + entry2.State);
+Console.WriteLine("b3.State:" + entry3.State);
+Console.WriteLine("b4.State:" + entry4.State);
+Console.WriteLine("b5.State:" + entry5.State);
+
+/*
+b1.State:Modified
+
+b1.DebugView:Book {Id: 1} Modified
+  Id: 1 PK
+  AuthorName: '杨中科'
+  Price: 22
+  PubTime: '2023-06-22 23:17:35'
+  Title: 'abc' Modified Originally '零基础趣学C语言2'
+  
+b2.State:Unchanged
+b3.State:Deleted
+b4.State:Added
+b5.State:Detached
+*/
+```
+
+DbContext会根据跟踪的实体的状态，在SaveChanges()的时候，根据实体状态的不同，生成Update、Delete、Insert等SQL语句，来把内存中实体的变化更新到数据库中。
+
+##### EF Core性能优化AsNoTracking
+
+EF Core默认会通过上下文查询出来的所有实体类进行跟踪。上下文中不仅会跟踪对象的状态改变，还会通过快照来记录实体类的原始值，这是比较消耗资源的。因此，如果开发人员能够确认通过上下文查询出来的对象只是用来展示，不会发生状态的改变，则可以使用AsNoTracking()来 “禁用跟踪”。
+
+如下例子中执行结果为`Detached`，也就是说使用AsNoTracking查询出来的实体类是不会被上下文跟踪的。因此如果查询出来的对象不会被修改、删除等，那么查询时可以AsNoTracking()，就能降低内存占用。
+
+```c#
+using TestDbContext ctx = new TestDbContext();
+Book[] books = ctx.Books.AsNoTracking().Take(3).ToArray();
+Book b1 = books[0];
+b1.Title = "abc";
+EntityEntry entry1 = ctx.Entry(b1);
+Console.WriteLine(entry1.State);
+
+//Detached
+```
+
+Find和FindAsync方法
+
+​	当使用EF Core从数据库中根据ID获取数据的时候，除了可以使用`ctx.Books.Single(b=>b.Id==id)`,还可以使用Find方法或者FindAsync方法
+
+Find或者FindAsync方法会先在上下文查找这个对象是否已经被跟踪，如果对象已经被跟踪，就直接返回被跟踪的对象，只有在本地没有找到这个对象时，EF Core才会去数据库查询，而Single方法一直都是执行一次数据库查询，因此用Find方法有可能减少一次数据库查询。但是如果对象在被跟踪之后，数据库中对应的数据已经被其他程序修改了，则会返回旧数据。
+
+```c#
+Book b =ctx.Books.Find(2)
+```
+
+
+
 ### LINQ查询
 
 LINQ是一种语言集成查询（Language Integrated Query）技术，可以在C#，.NET语言中使用。它提供了一种简单、统一的方式来查询各种数据源，包括集合、数据库和XML文档等。
